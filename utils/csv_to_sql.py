@@ -1,5 +1,6 @@
 import pandas as pd
 import regex as re
+from product_attributes_embedder import get_text_embeddings
 
 # === Load CSV ===
 df = pd.read_csv("./DB-MASCOT.csv")
@@ -80,7 +81,8 @@ def generate_enum_tables():
         create_enum_table_sql = f"""
         CREATE TABLE IF NOT EXISTS {enum_table} (
             id SERIAL PRIMARY KEY,
-            value TEXT UNIQUE
+            value TEXT UNIQUE,
+            embedding VECTOR(384) -- assuming 384-dim embeddings with all-MiniLM-L6-v2
         );
         """
         yield create_enum_table_sql
@@ -100,11 +102,69 @@ def populate_enum_tables():
             .dropna()
             .unique()
         )
-        # cp = 0
+        
+        cp = 0
         for val in unique_values:
-            # if cp > 20:
-            #     break  # Limit to first 20 unique values
-            # cp+=1
+            if cp > 3:
+                break  # Limit to first 20 unique values
+            cp+=1
+            
+            embedding = get_text_embeddings(val)
+            if embedding is None:
+                continue
+
+            embedding_str = ",".join([f"{x:.6f}" for x in embedding])
             val_escaped = str(val).replace("'", "''")
-            insert_enum_sql = f"INSERT INTO {enum_table} (value) VALUES ('{val_escaped}') ON CONFLICT DO NOTHING;"
+
+            insert_enum_sql = f"""
+                                INSERT INTO {enum_table} (value, embedding)
+                                VALUES ('{val_escaped}', ARRAY[{embedding_str}]::vector)
+                                ON CONFLICT (value) DO NOTHING;
+                            """
             yield (insert_enum_sql)
+    
+# === Create table ===
+create_sizes_table_sql = """
+CREATE TABLE IF NOT EXISTS Sizes (
+    id SERIAL PRIMARY KEY,
+    value TEXT UNIQUE
+);
+"""
+           
+def create_sizes_table():
+    # Columns of interest
+    size_columns = [
+        "eu_size",
+        "eu_size_part_1",
+        "eu_size_part_2",
+        "uk_size",
+        "uk_size_part_1",
+        "uk_size_part_2",
+        "us_size",
+        "us_size_part_1",
+        "us_size_part_2",
+    ]
+
+    # Collect all values across columns
+    all_sizes = pd.Series(dtype=str)
+    for col in size_columns:
+        col_values = (
+            df[col]
+            .astype(str)
+            .str.split(";")
+            .explode()
+            .dropna()
+            .str.strip()
+            .replace("", pd.NA)
+            .dropna()
+        )
+        all_sizes = pd.concat([all_sizes, col_values])
+
+    # Deduplicate
+    unique_sizes = all_sizes.drop_duplicates().unique()
+
+    # === Insert values ===
+    for val in unique_sizes:
+        val_escaped = str(val).replace("'", "''")
+        insert_sql = f"INSERT INTO Sizes (value) VALUES ('{val_escaped}') ON CONFLICT (value) DO NOTHING;"
+        yield insert_sql
