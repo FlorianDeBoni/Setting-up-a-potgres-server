@@ -1,21 +1,33 @@
+
 import pandas as pd
 import regex as re
 
-# Load the CSV
+# --- Load CSV ---
 df = pd.read_csv("./DB-MASCOT.csv")
-# Sanitize column names
+
+# --- Sanitize column names ---
 def sanitize_column(name):
-    name = name.strip().lower()                       # lowercase
-    name = re.sub(r"[^\w]", "_", name)               # replace non-word chars with _
-    if re.match(r"^\d", name):                       # if starts with digit, prefix with col_
+    name = name.strip().lower()
+    name = re.sub(r"[^\w]", "_", name)
+    if re.match(r"^\d", name):
         name = f"col_{name}"
-    if len(name) > 63:                               # Postgres max identifier length
+    if len(name) > 63:
         name = name[:63]
     return name
 
 df.columns = [sanitize_column(col) for col in df.columns]
 
-# Infer SQL type
+attributes = ["Product Type",
+                "Range",
+                "Certification",
+                "Industry name",
+                "Product type attributes",
+                "Segments",
+                "Quality",
+                "Colour",
+                "Quality Number"]
+
+# --- Infer SQL type ---
 def infer_sql_type(series: pd.Series) -> str:
     if pd.api.types.is_integer_dtype(series):
         return "BIGINT"
@@ -26,42 +38,55 @@ def infer_sql_type(series: pd.Series) -> str:
     else:
         max_len = series.astype(str).str.len().max()
         if max_len > 255:
-            return "TEXT"          # use TEXT for long strings
-        max_len = max(10, max_len)  # minimum length 10
+            return "TEXT"
+        max_len = max(10, max_len)
         return f"VARCHAR({max_len})"
 
-# Generate columns
+# --- Generate SQL schema ---
+table_name = "rawdata"
 columns_ddl = [f"id SERIAL PRIMARY KEY"]
 for col in df.columns:
-    columns_ddl.append(f"{col} {infer_sql_type(df[col])}")
+    if col not in detect_enum_columns(df):
+        columns_ddl.append(f"{col} {infer_sql_type(df[col])}")
 
-# Create table
-table_name = "RawData"
 create_table_sql = f"""
 CREATE TABLE IF NOT EXISTS {table_name} (
     {', '.join(columns_ddl)}
 );
 """
 
+# --- Create child tables for enum columns ---
+child_tables_sql = []
+for col in enum_columns:
+    col_table = f"{table_name}_{col}"
+    child_tables_sql.append(f"""
+CREATE TABLE IF NOT EXISTS {col_table} (
+    id SERIAL PRIMARY KEY,
+    {table_name}_id INT REFERENCES {table_name}(id),
+    {col} TEXT
+);
+""")
+
+# --- Generate INSERT statements ---
 def generate_inserts():
     def sql_value(val):
         if pd.isna(val):
             return "NULL"
         elif isinstance(val, str):
-            # Escape single quotes by doubling them
-            val_escaped = val.replace("'", "''")
-            return f"'{val_escaped}'"
+            return "'" + val.replace("'", "''") + "'"
         elif isinstance(val, bool):
             return 'TRUE' if val else 'FALSE'
         else:
             return str(val)
 
-    cp = 0
+    base_cols = [c for c in df.columns if c not in enum_columns]
     for _, row in df.iterrows():
-        if cp < 20:
-            cp+=1
-            # print(cp)
-            values = ", ".join(sql_value(row[col]) for col in df.columns)
-            yield f"INSERT INTO {table_name} ({', '.join(df.columns)}) VALUES ({values});"
-        else:
-            break
+        base_values = ", ".join(sql_value(row[c]) for c in base_cols)
+        yield f"INSERT INTO {table_name} ({', '.join(base_cols)}) VALUES ({base_values});"
+        for col in enum_columns:
+            if pd.notna(row[col]):
+                for val in str(row[col]).split(';'):
+                    val = val.strip()
+                    if val:
+                        child_table = f"{table_name}_{col}"
+                        yield f"INSERT INTO {child_table} ({table_name}_id, {col}) VALUES (CURRVAL(pg_get_serial_sequence('{table_name}', 'id')), {sql_value(val)});"
