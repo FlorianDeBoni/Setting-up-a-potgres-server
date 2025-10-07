@@ -1,33 +1,22 @@
-
 import pandas as pd
 import regex as re
 
-# --- Load CSV ---
+# === Load CSV ===
 df = pd.read_csv("./DB-MASCOT.csv")
 
-# --- Sanitize column names ---
+# === Sanitize column names ===
 def sanitize_column(name):
-    name = name.strip().lower()
-    name = re.sub(r"[^\w]", "_", name)
-    if re.match(r"^\d", name):
+    name = name.strip().lower()                       # lowercase
+    name = re.sub(r"[^\w]", "_", name)                # replace non-word chars with _
+    if re.match(r"^\d", name):                        # if starts with digit, prefix with col_
         name = f"col_{name}"
-    if len(name) > 63:
+    if len(name) > 63:                                # Postgres max identifier length
         name = name[:63]
     return name
 
 df.columns = [sanitize_column(col) for col in df.columns]
 
-attributes = ["Product Type",
-                "Range",
-                "Certification",
-                "Industry name",
-                "Product type attributes",
-                "Segments",
-                "Quality",
-                "Colour",
-                "Quality Number"]
-
-# --- Infer SQL type ---
+# === Infer SQL type ===
 def infer_sql_type(series: pd.Series) -> str:
     if pd.api.types.is_integer_dtype(series):
         return "BIGINT"
@@ -38,55 +27,84 @@ def infer_sql_type(series: pd.Series) -> str:
     else:
         max_len = series.astype(str).str.len().max()
         if max_len > 255:
-            return "TEXT"
-        max_len = max(10, max_len)
+            return "TEXT"          # use TEXT for long strings
+        max_len = max(10, max_len)  # minimum length 10
         return f"VARCHAR({max_len})"
 
-# --- Generate SQL schema ---
-table_name = "rawdata"
+# === Generate main table DDL ===
 columns_ddl = [f"id SERIAL PRIMARY KEY"]
 for col in df.columns:
-    if col not in detect_enum_columns(df):
-        columns_ddl.append(f"{col} {infer_sql_type(df[col])}")
+    columns_ddl.append(f"{col} {infer_sql_type(df[col])}")
 
+table_name = "RawData"
 create_table_sql = f"""
 CREATE TABLE IF NOT EXISTS {table_name} (
     {', '.join(columns_ddl)}
 );
 """
 
-# --- Create child tables for enum columns ---
-child_tables_sql = []
-for col in enum_columns:
-    col_table = f"{table_name}_{col}"
-    child_tables_sql.append(f"""
-CREATE TABLE IF NOT EXISTS {col_table} (
-    id SERIAL PRIMARY KEY,
-    {table_name}_id INT REFERENCES {table_name}(id),
-    {col} TEXT
-);
-""")
-
-# --- Generate INSERT statements ---
+# === Generate insert statements for main table ===
 def generate_inserts():
     def sql_value(val):
         if pd.isna(val):
             return "NULL"
         elif isinstance(val, str):
-            return "'" + val.replace("'", "''") + "'"
+            val_escaped = val.replace("'", "''")
+            return f"'{val_escaped}'"
         elif isinstance(val, bool):
             return 'TRUE' if val else 'FALSE'
         else:
             return str(val)
-
-    base_cols = [c for c in df.columns if c not in enum_columns]
+    cp = 0
     for _, row in df.iterrows():
-        base_values = ", ".join(sql_value(row[c]) for c in base_cols)
-        yield f"INSERT INTO {table_name} ({', '.join(base_cols)}) VALUES ({base_values});"
-        for col in enum_columns:
-            if pd.notna(row[col]):
-                for val in str(row[col]).split(';'):
-                    val = val.strip()
-                    if val:
-                        child_table = f"{table_name}_{col}"
-                        yield f"INSERT INTO {child_table} ({table_name}_id, {col}) VALUES (CURRVAL(pg_get_serial_sequence('{table_name}', 'id')), {sql_value(val)});"
+        if cp>20:
+            break  # Limit to first 20 rows for testing
+        cp+=1
+        values = ", ".join(sql_value(row[col]) for col in df.columns)
+        yield f"INSERT INTO {table_name} ({', '.join(df.columns)}) VALUES ({values});"
+
+# === Create per-attribute enumeration tables ===
+attributes = ["Product Type",
+                    "Range",
+                    "Certification",
+                    "Industry name",
+                    "Product type attributes",
+                    "Segments",
+                    "Quality",
+                    "Colour",
+                    "Quality Number"]
+
+def generate_enum_tables():
+    for col in attributes:
+        enum_table = sanitize_column(col)
+        create_enum_table_sql = f"""
+        CREATE TABLE IF NOT EXISTS {enum_table} (
+            id SERIAL PRIMARY KEY,
+            value TEXT UNIQUE
+        );
+        """
+        yield create_enum_table_sql
+
+def populate_enum_tables():
+    for col in attributes:
+        enum_table = sanitize_column(col)
+        # Split values by ';' and clean up
+        unique_values = (
+            df[enum_table]
+            .astype(str)
+            .str.split(";")
+            .explode()
+            .dropna()
+            .str.strip()
+            .replace("", pd.NA)
+            .dropna()
+            .unique()
+        )
+        # cp = 0
+        for val in unique_values:
+            # if cp > 20:
+            #     break  # Limit to first 20 unique values
+            # cp+=1
+            val_escaped = str(val).replace("'", "''")
+            insert_enum_sql = f"INSERT INTO {enum_table} (value) VALUES ('{val_escaped}') ON CONFLICT DO NOTHING;"
+            yield (insert_enum_sql)
