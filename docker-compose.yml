@@ -10,11 +10,12 @@ services:
       POSTGRES_PASSWORD: 1234
       POSTGRES_DB: postgres
     ports:
-      - "5432:5432"
+      - "5444:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     networks:
       - pgnet
+      # - caddy
 
   pgadmin:
     image: dpage/pgadmin4
@@ -29,10 +30,13 @@ services:
       - postgres
     networks:
       - pgnet
+      # - caddy
 
 volumes:
   postgres_data:
 
 networks:
+  # caddy:
+  #   external: true
   pgnet:
-    driver: bridge
+    external: true

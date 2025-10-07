@@ -6,7 +6,7 @@ DB_SETTINGS = {
     "dbname": "postgres",
     "user": "postgres",
     "password": "1234",
-    "host": "localhost",
+    "host": "mascot-postgres",
     "port": 5432
 }
 
