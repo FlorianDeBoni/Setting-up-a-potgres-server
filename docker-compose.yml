@@ -15,7 +15,7 @@ services:
       - postgres_data:/var/lib/postgresql/data
     networks:
       - pgnet
-      # - caddy
+      - caddy
 
   pgadmin:
     image: dpage/pgadmin4
@@ -30,13 +30,25 @@ services:
       - postgres
     networks:
       - pgnet
-      # - caddy
+      - caddy
+
+  python-migrate-script:
+    build: .
+    container_name: python-migrate-script
+    volumes:
+      - ./utils:/app
+    depends_on:
+      - postgres
+    networks:
+      - pgnet
+    tty: true
+    stdin_open: true
 
 volumes:
   postgres_data:
 
 networks:
-  # caddy:
-  #   external: true
+  caddy:
+    external: true
   pgnet:
     external: true
