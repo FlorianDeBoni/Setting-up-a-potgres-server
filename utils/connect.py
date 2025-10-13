@@ -6,8 +6,8 @@ DB_SETTINGS = {
     "dbname": "postgres",
     "user": "postgres",
     "password": "1234",
-    "host": "mascot-postgres",
-    "port": 5432
+    "host": "localhost",
+    "port": 5444
 }
 
 conn = psycopg2.connect(**DB_SETTINGS)
